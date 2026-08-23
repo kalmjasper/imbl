@@ -23,8 +23,10 @@ const NUM_CHILDREN: usize = NODE_SIZE + 1;
 /// The main tree representation uses [`Branch`] and [`Leaf`]; this is only used
 /// in places that want to handle either a branch or a leaf.
 #[derive(Debug)]
-pub(crate) enum Node<K, V, P: SharedPointerKind> {
+pub enum Node<K, V, P: SharedPointerKind> {
+    /// An internal node, containing only keys and child pointers.
     Branch(SharedPointer<Branch<K, V, P>, P>),
+    /// A leaf node, containing key/value pairs.
     Leaf(SharedPointer<Leaf<K, V>, P>),
 }
 
@@ -105,19 +107,22 @@ impl<K, V, P: SharedPointerKind> Node<K, V, P> {
 /// * all keys in the subtree at children[i] are between keys[i - 1] (if i > 0) and keys[i] (if i < keys.len()).
 /// * root branch must have at least 1 key, whereas non-root branches must have at least MEDIAN - 1 keys
 #[derive(Debug)]
-pub(crate) struct Branch<K, V, P: SharedPointerKind> {
+pub struct Branch<K, V, P: SharedPointerKind> {
     keys: Chunk<K, NODE_SIZE>,
     children: Children<K, V, P>,
 }
 
+/// The children of a [`Branch`] node.
 #[derive(Debug)]
-pub(crate) enum Children<K, V, P: SharedPointerKind> {
+pub enum Children<K, V, P: SharedPointerKind> {
     /// implicitly level 1
     Leaves {
+        /// The leaf children of this node.
         leaves: Chunk<SharedPointer<Leaf<K, V>, P>, NUM_CHILDREN>,
     },
     /// level >= 2
     Branches {
+        /// The branch children of this node.
         branches: Chunk<SharedPointer<Branch<K, V, P>, P>, NUM_CHILDREN>,
         /// The level of the tree node that contains these children.
         ///
@@ -256,8 +261,67 @@ impl<K, V, P: SharedPointerKind> Branch<K, V, P> {
 /// * leaf is the lowest level in the tree (level 0)
 /// * non-root leaves must have at least THIRD keys
 #[derive(Debug)]
-pub(crate) struct Leaf<K, V> {
+pub struct Leaf<K, V> {
     keys: Chunk<(K, V), NODE_SIZE>,
+}
+
+// Fork additions: read-only accessors for external traversal of the tree.
+// These expose existing private fields and search behavior; they add no new
+// tree logic and make no structural or behavioral changes.
+impl<K, V, P: SharedPointerKind> Branch<K, V, P> {
+    /// The number of keys in this branch node.
+    ///
+    /// The number of children is always `num_keys() + 1`.
+    pub fn num_keys(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// A reference to the key at index `i`.
+    ///
+    /// Branch nodes store only keys; values live in [`Leaf`] nodes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `i >= self.num_keys()`.
+    pub fn key_at(&self, i: usize) -> &K {
+        &self.keys[i]
+    }
+
+    /// A reference to this branch node's children.
+    pub fn children(&self) -> &Children<K, V, P> {
+        &self.children
+    }
+
+    /// The index of the child to descend into when searching for `key`.
+    ///
+    /// This performs exactly the per-node search step used internally by
+    /// [`Branch::lookup`], including its handling of a key equal to a branch
+    /// key (descend to the right of it). The result is always a valid index
+    /// into this node's children.
+    pub fn search_key<Q>(&self, key: &Q) -> usize
+    where
+        Q: Comparable<K> + ?Sized,
+    {
+        slice_ext::binary_search_by(&self.keys, |k| key.compare(k).reverse())
+            .map(|x| x + 1)
+            .unwrap_or_else(|x| x)
+    }
+}
+
+impl<K, V> Leaf<K, V> {
+    /// The number of key/value pairs in this leaf node.
+    pub fn num_keys(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// A reference to the key/value pair at index `i`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `i >= self.num_keys()`.
+    pub fn key_value_at(&self, i: usize) -> &(K, V) {
+        &self.keys[i]
+    }
 }
 
 impl<K: Ord + Clone, V: Clone, P: SharedPointerKind> Node<K, V, P> {
@@ -683,7 +747,8 @@ impl<K: Ord, V, P: SharedPointerKind> Branch<K, V, P> {
             }
         }
     }
-    pub(crate) fn lookup<Q>(&self, key: &Q) -> Option<&(K, V)>
+    /// Look up `key` in the subtree rooted at this branch node.
+    pub fn lookup<Q>(&self, key: &Q) -> Option<&(K, V)>
     where
         Q: Comparable<K> + ?Sized,
     {
@@ -707,7 +772,8 @@ impl<K: Ord, V> Leaf<K, V> {
     fn max(&self) -> Option<&(K, V)> {
         self.keys.last()
     }
-    fn lookup<Q>(&self, key: &Q) -> Option<&(K, V)>
+    /// Look up `key` in this leaf node.
+    pub fn lookup<Q>(&self, key: &Q) -> Option<&(K, V)>
     where
         Q: Comparable<K> + ?Sized,
     {
@@ -732,7 +798,8 @@ impl<K: Ord, V, P: SharedPointerKind> Node<K, V, P> {
         }
     }
 
-    pub(crate) fn lookup<Q>(&self, key: &Q) -> Option<&(K, V)>
+    /// Look up `key` in the subtree rooted at this node.
+    pub fn lookup<Q>(&self, key: &Q) -> Option<&(K, V)>
     where
         Q: Comparable<K> + ?Sized,
     {
