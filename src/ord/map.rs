@@ -102,6 +102,17 @@ impl<K, V, P: SharedPointerKind> GenericOrdMap<K, V, P> {
         }
     }
 
+    /// Get a reference to the root node of the map's B+Tree, or `None` if
+    /// the map is empty.
+    ///
+    /// This exposes the map's internal tree structure for advanced read-only
+    /// use (e.g. driving a traversal from outside the crate). The node
+    /// representation comes with no stability guarantees.
+    #[must_use]
+    pub fn root_node(&self) -> Option<&Node<K, V, P>> {
+        self.root.as_ref()
+    }
+
     /// Construct a map with a single mapping.
     ///
     /// # Examples
