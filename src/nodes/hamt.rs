@@ -235,6 +235,26 @@ where
         None
     }
 
+    /// The first stored value whose control byte and hash match `hash`,
+    /// *without* comparing keys.
+    ///
+    /// This exposes the midpoint of [`get`][Self::get] so a caller driving its
+    /// own traversal can prefetch the candidate's key buffer — the last
+    /// dependent cache miss in a lookup — before committing to the comparison
+    /// that needs it. The control bytes it reads live at the front of the node,
+    /// so a caller that has already prefetched the node pays no miss here.
+    ///
+    /// This is a *hint*, not an answer. The returned value's key may differ
+    /// from the one being looked up; only [`get`][Self::get] decides that.
+    #[inline]
+    #[must_use]
+    pub fn candidate(&self, hash: HashBits) -> Option<&A> {
+        let (search, group) = Self::ctrl_hash_and_group(hash);
+        let offset = group_find(&self.control[group], search).first_index()?;
+        let (value, _) = self.data.get(group * GROUP_WIDTH + offset)?;
+        Some(value)
+    }
+
     pub(crate) fn get_mut<Q>(&mut self, hash: HashBits, key: &Q) -> Option<&mut A>
     where
         Q: Equivalent<A::Key> + ?Sized,
@@ -399,6 +419,24 @@ impl<A: HashValue, P: SharedPointerKind> Entry<A, P> {
                 }
             }
             _ => HamtNode::get_terminal(self, hash, key),
+        }
+    }
+
+    /// The value [`lookup`][Self::lookup] is most likely to return, found
+    /// without comparing keys.
+    ///
+    /// Same contract as [`GenericSimdNode::candidate`]: a hint whose key buffer
+    /// is worth prefetching, never an answer. Returns `None` for the variants
+    /// whose resolution cannot be narrowed to one slot this cheaply — a child
+    /// node (the descent has not finished) and a collision node (a linear scan
+    /// with no single candidate).
+    #[must_use]
+    pub fn lookup_candidate(&self, hash: HashBits) -> Option<&A> {
+        match self {
+            Entry::Value(value, value_hash) => hash_may_eq::<A>(hash, *value_hash).then_some(value),
+            Entry::SmallSimdNode(small) => small.candidate(hash),
+            Entry::LargeSimdNode(large) => large.candidate(hash),
+            Entry::HamtNode(_) | Entry::Collision(_) => None,
         }
     }
 }
