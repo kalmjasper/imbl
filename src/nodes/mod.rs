@@ -4,12 +4,14 @@
 
 //! Internal tree node types backing the collection types.
 //!
-//! Only the [`btree`] module (backing `OrdMap`/`OrdSet`) is public; it is
-//! exposed for advanced read-only use and comes with no stability guarantees.
+//! The [`btree`] (backing `OrdMap`/`OrdSet`) and [`hamt`] (backing
+//! `HashMap`/`HashSet`) modules are public; they are exposed for advanced
+//! read-only use and come with no stability guarantees.
 
 /// The B+Tree nodes backing `OrdMap` and `OrdSet`.
 pub mod btree;
-pub(crate) mod hamt;
+/// The hash array mapped trie nodes backing `HashMap` and `HashSet`.
+pub mod hamt;
 pub(crate) mod rrb;
 
 pub(crate) mod chunk {

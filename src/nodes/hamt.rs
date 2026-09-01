@@ -16,7 +16,8 @@ use imbl_sized_chunks::inline_array::InlineArray;
 use imbl_sized_chunks::sparse_chunk::{Iter as ChunkIter, IterMut as ChunkIterMut, SparseChunk};
 
 use crate::config::HASH_LEVEL_SIZE as HASH_SHIFT;
-pub(crate) type HashBits = <BitsImpl<HASH_WIDTH> as Bits>::Store; // a uint of HASH_WIDTH bits
+/// The unsigned integer type used to store a key's hash.
+pub type HashBits = <BitsImpl<HASH_WIDTH> as Bits>::Store; // a uint of HASH_WIDTH bits
 
 const HASH_WIDTH: usize = 2_usize.pow(HASH_SHIFT as u32);
 const ITER_STACK_CAPACITY: usize = HASH_WIDTH.div_ceil(HASH_SHIFT) + 1;
@@ -33,8 +34,10 @@ const _: () = {
     assert!(HASH_SHIFT >= 3, "HASH_LEVEL_SIZE must be at least 3");
 };
 
+/// Hash `key` with the given [`BuildHasher`], the same way the HAMT does
+/// internally.
 #[inline]
-pub(crate) fn hash_key<K: Hash + ?Sized, S: BuildHasher>(bh: &S, key: &K) -> HashBits {
+pub fn hash_key<K: Hash + ?Sized, S: BuildHasher>(bh: &S, key: &K) -> HashBits {
     bh.hash_one(key) as HashBits
 }
 
@@ -76,16 +79,21 @@ where
     }
 }
 
+/// A value that can be stored in a HAMT node: something with an extractable,
+/// comparable key.
 pub trait HashValue {
+    /// The key type used to compare values for equality.
     type Key: Eq;
 
+    /// Extract the key from this value.
     fn extract_key(&self) -> &Self::Key;
+    /// Test whether two values are the same object in memory.
     fn ptr_eq(&self, other: &Self) -> bool;
 }
 
 /// Generic SIMD node that stores leaf values only (no child nodes).
 /// Uses SIMD control bytes for fast parallel lookup.
-pub(crate) struct GenericSimdNode<A, const WIDTH: usize, const GROUPS: usize>
+pub struct GenericSimdNode<A, const WIDTH: usize, const GROUPS: usize>
 where
     BitsImpl<WIDTH>: Bits,
 {
@@ -100,7 +108,7 @@ where
 
 /// HAMT node that stores Entry enum (can contain values or child nodes).
 /// Uses classic HAMT bitmap-indexed structure without SIMD.
-pub(crate) struct HamtNode<A, P: SharedPointerKind>
+pub struct HamtNode<A, P: SharedPointerKind>
 where
     BitsImpl<HASH_WIDTH>: Bits,
 {
@@ -131,11 +139,14 @@ where
     }
 }
 
-pub(crate) type SmallSimdNode<A> = GenericSimdNode<A, SMALL_NODE_WIDTH, 1>;
-pub(crate) type LargeSimdNode<A> = GenericSimdNode<A, HASH_WIDTH, 2>;
+/// A [`GenericSimdNode`] sized for the small (single-group) case.
+pub type SmallSimdNode<A> = GenericSimdNode<A, SMALL_NODE_WIDTH, 1>;
+/// A [`GenericSimdNode`] sized for the large (two-group) case.
+pub type LargeSimdNode<A> = GenericSimdNode<A, HASH_WIDTH, 2>;
 
 // Legacy type alias for compatibility
-pub(crate) type Node<A, P> = HamtNode<A, P>;
+/// The root node type backing the HAMT.
+pub type Node<A, P> = HamtNode<A, P>;
 
 impl<A, const WIDTH: usize, const GROUPS: usize> Default for GenericSimdNode<A, WIDTH, GROUPS>
 where
@@ -203,8 +214,10 @@ impl<A: HashValue, const WIDTH: usize, const GROUPS: usize> GenericSimdNode<A, W
 where
     BitsImpl<WIDTH>: Bits,
 {
+    /// Look up `key` (with the given precomputed `hash`) among this node's
+    /// values.
     #[inline]
-    pub(crate) fn get<Q>(&self, hash: HashBits, key: &Q) -> Option<&A>
+    pub fn get<Q>(&self, hash: HashBits, key: &Q) -> Option<&A>
     where
         Q: Equivalent<A::Key> + ?Sized,
     {
@@ -327,6 +340,69 @@ where
     }
 }
 
+// Fork additions: read-only accessors for external traversal of the trie.
+// These expose existing private fields and lookup behavior; they add no new
+// trie logic and make no structural or behavioral changes.
+
+/// Bits of hash consumed per trie level.
+///
+/// A caller walking the trie from outside the crate needs this to advance
+/// `shift` between levels instead of hardcoding the internal constant.
+pub const LEVEL_SHIFT: usize = HASH_SHIFT;
+
+impl<A, P: SharedPointerKind> HamtNode<A, P>
+where
+    BitsImpl<HASH_WIDTH>: Bits,
+{
+    /// The index of the child slot for `hash` at hash-bit offset `shift`.
+    ///
+    /// This depends only on `hash` and `shift`, never on this node's
+    /// contents: a caller that has hashed its keys up front can compute
+    /// every slot index down to a given depth before loading a single node,
+    /// which is the whole point of exposing it.
+    #[must_use]
+    pub fn child_index(hash: HashBits, shift: usize) -> usize {
+        Self::mask(hash, shift) as usize
+    }
+
+    /// A reference to the entry stored at `index`, or `None` if that slot is
+    /// empty.
+    #[must_use]
+    pub fn entry_at(&self, index: usize) -> Option<&Entry<A, P>> {
+        self.data.get(index)
+    }
+}
+
+impl<A: HashValue, P: SharedPointerKind> Entry<A, P> {
+    /// Resolve a lookup that has arrived at this entry, given the full
+    /// `hash` of the key and the hash-bit offset `shift` at which this
+    /// entry was found.
+    ///
+    /// This is total over all entry variants: a [`HamtNode`] child continues
+    /// the search one level down, a [`Entry::Value`] is checked directly,
+    /// and the SIMD and collision node variants are resolved the same way
+    /// [`HamtNode::get`] resolves them internally. A caller driving its own
+    /// descent can call this on whatever entry it lands on without needing
+    /// to know which variant it is.
+    #[must_use]
+    pub fn lookup<Q>(&self, hash: HashBits, shift: usize, key: &Q) -> Option<&A>
+    where
+        Q: Equivalent<A::Key> + ?Sized,
+    {
+        match self {
+            Entry::HamtNode(child) => child.get(hash, shift + HASH_SHIFT, key),
+            Entry::Value(value, value_hash) => {
+                if hash_may_eq::<A>(hash, *value_hash) && key.equivalent(value.extract_key()) {
+                    Some(value)
+                } else {
+                    None
+                }
+            }
+            _ => HamtNode::get_terminal(self, hash, key),
+        }
+    }
+}
+
 impl<A: HashValue> SmallSimdNode<A> {
     #[cold]
     fn upgrade_to_large<P: SharedPointerKind>(
@@ -396,7 +472,9 @@ impl<A: HashValue> LargeSimdNode<A> {
 }
 
 impl<A: HashValue, P: SharedPointerKind> HamtNode<A, P> {
-    pub(crate) fn get<Q>(&self, hash: HashBits, shift: usize, key: &Q) -> Option<&A>
+    /// Look up `key` (with the given precomputed `hash`) in the subtree
+    /// rooted at this node, starting at hash-bit offset `shift`.
+    pub fn get<Q>(&self, hash: HashBits, shift: usize, key: &Q) -> Option<&A>
     where
         Q: Equivalent<A::Key> + ?Sized,
     {
@@ -614,17 +692,29 @@ impl<A: HashValue, P: SharedPointerKind> HamtNode<A, P> {
     }
 }
 
+/// A node holding entries whose hashes collided all the way to the deepest
+/// level of the trie.
 #[derive(Clone)]
-pub(crate) struct CollisionNode<A> {
+pub struct CollisionNode<A> {
     hash: HashBits,
     data: Vec<A>,
 }
 
-pub(crate) enum Entry<A, P: SharedPointerKind> {
+/// A single slot in a [`HamtNode`]'s data array.
+pub enum Entry<A, P: SharedPointerKind> {
+    /// A child node one level further down the trie; the search continues
+    /// there with the next chunk of hash bits.
     HamtNode(SharedPointer<HamtNode<A, P>, P>),
+    /// A small SIMD-searched leaf node, used before it grows large enough
+    /// to need [`LargeSimdNode`].
     SmallSimdNode(SharedPointer<SmallSimdNode<A>, P>),
+    /// A large SIMD-searched leaf node, used before it grows large enough
+    /// to be upgraded to a full [`HamtNode`].
     LargeSimdNode(SharedPointer<LargeSimdNode<A>, P>),
+    /// A single stored value, together with its hash.
     Value(A, HashBits),
+    /// A node holding entries whose hashes collided all the way to the
+    /// deepest level of the trie.
     Collision(SharedPointer<CollisionNode<A>, P>),
 }
 
@@ -747,6 +837,7 @@ impl<A, P: SharedPointerKind> Node<A, P> {
 /// An allocation-free stack for iterators.
 type InlineStack<T> = InlineArray<T, (usize, [T; ITER_STACK_CAPACITY])>;
 
+#[allow(clippy::enum_variant_names)]
 enum IterItem<'a, A, P: SharedPointerKind> {
     SmallSimdNode(ChunkIter<'a, (A, HashBits), SMALL_NODE_WIDTH>),
     LargeSimdNode(ChunkIter<'a, (A, HashBits), HASH_WIDTH>),
@@ -868,6 +959,7 @@ impl<'a, A, P: SharedPointerKind> FusedIterator for Iter<'a, A, P> where A: 'a {
 
 // Mut ref iterator
 
+#[allow(clippy::enum_variant_names)]
 enum IterMutItem<'a, A, P: SharedPointerKind> {
     SmallSimdNode(ChunkIterMut<'a, (A, HashBits), SMALL_NODE_WIDTH>),
     LargeSimdNode(ChunkIterMut<'a, (A, HashBits), HASH_WIDTH>),

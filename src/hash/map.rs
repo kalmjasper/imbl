@@ -240,6 +240,32 @@ impl<K, V, S, P: SharedPointerKind> GenericHashMap<K, V, S, P> {
         &self.hasher
     }
 
+    /// Get a reference to the root node of the map's HAMT, or `None` if the
+    /// map is empty.
+    ///
+    /// This exposes the map's internal tree structure for advanced read-only
+    /// use (e.g. driving a traversal from outside the crate). The node
+    /// representation comes with no stability guarantees.
+    #[must_use]
+    pub fn root_node(&self) -> Option<&Node<(K, V), P>> {
+        self.root.as_deref()
+    }
+
+    /// Hash `key` with this map's own hasher.
+    ///
+    /// A caller driving its own traversal of the map's HAMT (starting from
+    /// [`root_node`][Self::root_node]) needs this to compute the hash it
+    /// will walk with: the map's hasher (in particular the default
+    /// [`RandomState`][std::collections::hash_map::RandomState]) is seeded
+    /// per instance, so there is no way to reproduce it from outside.
+    #[must_use]
+    pub fn hash_of<Q: Hash + ?Sized>(&self, key: &Q) -> HashBits
+    where
+        S: BuildHasher,
+    {
+        hash_key(&self.hasher, key)
+    }
+
     /// Construct an empty hash map using the same hasher as the
     /// current hash map.
     #[inline]
